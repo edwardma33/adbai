@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 
 const geistSans = Geist({
@@ -16,18 +16,6 @@ type SaveResponse = {
   updatedAt: number;
 };
 
-type SocketMessage =
-  | {
-      type: "textarea:init";
-      content: string;
-      updatedAt: number;
-    }
-  | {
-      type: "textarea:update";
-      content: string;
-      updatedAt: number;
-    };
-
 function formatTimestamp(timestamp: number) {
   if (!timestamp) {
     return "Not saved yet";
@@ -42,123 +30,52 @@ function formatTimestamp(timestamp: number) {
 export default function Home() {
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
-  const [connectionState, setConnectionState] = useState<"connecting" | "connected" | "reconnecting">(
-    "connecting",
-  );
+  const [connectionState, setConnectionState] = useState<"loading" | "ready">("loading");
   const [lastSavedAt, setLastSavedAt] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const socketRef = useRef<WebSocket | null>(null);
-  const hasEditedRef = useRef(false);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestContentRef = useRef("");
-
   const isDirty = useMemo(() => content !== savedContent, [content, savedContent]);
-
-  useEffect(() => {
-    latestContentRef.current = content;
-  }, [content]);
 
   useEffect(() => {
     let cancelled = false;
 
-    const connect = () => {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-      socketRef.current = socket;
+    const loadPersistedDocument = async () => {
+      const response = await fetch("/api/textarea");
 
-      socket.onopen = () => {
-        if (cancelled) {
-          return;
-        }
+      if (!response.ok) {
+        throw new Error(`Load failed with status ${response.status}`);
+      }
 
-        setConnectionState("connected");
-
-        if (hasEditedRef.current && socket.readyState === WebSocket.OPEN) {
-          socket.send(
-            JSON.stringify({
-              type: "textarea:update",
-              content: latestContentRef.current,
-            }),
-          );
-        }
-      };
-
-      socket.onmessage = (event) => {
-        if (cancelled) {
-          return;
-        }
-
-        let payload: SocketMessage;
-
-        try {
-          payload = JSON.parse(event.data as string) as SocketMessage;
-        } catch {
-          return;
-        }
-
-        if (payload.type === "textarea:init" && hasEditedRef.current) {
-          return;
-        }
-
-        setContent(payload.content);
-        if (payload.type === "textarea:init") {
-          setSavedContent(payload.content);
-          setLastSavedAt(payload.updatedAt);
-        }
-      };
-
-      socket.onclose = () => {
-        if (cancelled) {
-          return;
-        }
-
-        setConnectionState("reconnecting");
-
-        if (reconnectTimerRef.current) {
-          clearTimeout(reconnectTimerRef.current);
-        }
-
-        reconnectTimerRef.current = setTimeout(connect, 1200);
-      };
-
-      socket.onerror = () => {
-        setError("Websocket connection error");
-      };
+      return (await response.json()) as SaveResponse;
     };
 
-    connect();
+    loadPersistedDocument()
+      .then((document) => {
+        if (cancelled) {
+          return;
+        }
+
+        setContent(document.content);
+        setSavedContent(document.content);
+        setLastSavedAt(document.updatedAt);
+        setConnectionState("ready");
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setError("Unable to load saved data");
+          setConnectionState("ready");
+        }
+      });
 
     return () => {
       cancelled = true;
-
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
-      }
-
-      socketRef.current?.close();
     };
   }, []);
 
-  const sendUpdate = (nextContent: string) => {
-    const socket = socketRef.current;
-
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(
-        JSON.stringify({
-          type: "textarea:update",
-          content: nextContent,
-        }),
-      );
-    }
-  };
-
   const handleChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
     const nextContent = event.target.value;
-    hasEditedRef.current = true;
     setContent(nextContent);
-    sendUpdate(nextContent);
     setError(null);
   };
 
@@ -182,7 +99,6 @@ export default function Home() {
       const data = (await response.json()) as SaveResponse;
       setSavedContent(data.content);
       setLastSavedAt(data.updatedAt);
-      hasEditedRef.current = false;
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Unable to save");
     } finally {
@@ -205,17 +121,6 @@ export default function Home() {
       setContent(data.content);
       setSavedContent(data.content);
       setLastSavedAt(data.updatedAt);
-      hasEditedRef.current = false;
-
-      const socket = socketRef.current;
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(
-          JSON.stringify({
-            type: "textarea:update",
-            content: data.content,
-          }),
-        );
-      }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load saved data");
     } finally {
@@ -245,13 +150,11 @@ export default function Home() {
   };
 
   const statusLabel =
-    connectionState === "connected"
+    connectionState === "ready"
       ? isDirty
-        ? "Live, unsaved changes"
-        : "Live, in sync"
-      : connectionState === "connecting"
-        ? "Connecting"
-        : "Reconnecting";
+        ? "Draft, not saved"
+        : "Saved and loaded"
+      : "Loading";
 
   return (
     <div
@@ -261,14 +164,15 @@ export default function Home() {
         <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
           <section className="rounded-[2rem] border border-white/10 bg-white/10 p-8 shadow-2xl shadow-black/30 backdrop-blur-xl">
             <p className="mb-4 text-xs uppercase tracking-[0.28em] text-cyan-200/80">
-              websocket textarea
+              request-based textarea
             </p>
             <h1 className="max-w-xl text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-              A single textarea that stays in sync across every open client.
+              A textarea that saves to SQLite and reloads on demand.
             </h1>
             <p className="mt-4 max-w-2xl text-base leading-7 text-slate-300">
-              Typing updates the shared value over websockets in real time. The
-              save button writes the current text into SQLite through Drizzle.
+              Type your draft locally, click save to persist it with Drizzle and
+              SQLite, then refresh from the server to see the stored value in
+              another session.
             </p>
 
             <div className="mt-8 grid gap-4 sm:grid-cols-3">
@@ -278,6 +182,9 @@ export default function Home() {
                 </div>
                 <div className="mt-2 text-sm font-medium text-white">
                   {statusLabel}
+                </div>
+                <div className="mt-1 text-xs text-slate-400">
+                  Refresh to see the latest saved content.
                 </div>
               </div>
               <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
@@ -323,7 +230,7 @@ export default function Home() {
                 disabled={isSaving}
                 className="rounded-full border border-white/15 bg-white/5 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                Load saved
+                Refresh saved
               </button>
             </div>
 
