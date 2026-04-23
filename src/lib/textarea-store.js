@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const Database = require("better-sqlite3");
@@ -7,7 +8,9 @@ const { eq } = require("drizzle-orm");
 const { drizzle } = require("drizzle-orm/better-sqlite3");
 const { integer, sqliteTable, text } = require("drizzle-orm/sqlite-core");
 
-const databaseDirectory = path.join(process.cwd(), "data");
+const databaseDirectory = process.env.VERCEL
+  ? path.join(os.tmpdir(), "adbai")
+  : path.join(process.cwd(), "data");
 const databasePath = path.join(databaseDirectory, "textarea.db");
 
 fs.mkdirSync(databaseDirectory, { recursive: true });
